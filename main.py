@@ -10,7 +10,7 @@ from pydantic import BaseModel
 
 app = FastAPI(title="NQ ML Gatekeeper - Final Production Version")
 
-# VÉGLEGES JAVÍTÁS: A Render felületéről olvassa be a küszöböt. 
+# A Render felületéről olvassa be a küszöböt. 
 # Ha nincs ott beállítva semmi, akkor az optimális 0.38-as (38%) értéket használja.
 CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", 0.38))
 PICKMYTRADE_URL = "https://api.pickmytrade.trade/v2/add-trade-data-latest?t=17149"
@@ -43,7 +43,7 @@ def forward_to_execution(side: str, close_price: float):
         "symbol": "MNQM6",
         "date": current_time_str,
         "data": side,
-        "quantity": 10,
+        "quantity": 5,  # FRISSÍTVE: Kockázatkezelés beállítva 5 kontraktusra
         "risk_percentage": 0,
         "price": close_price,
         "gtd_in_second": 0,
