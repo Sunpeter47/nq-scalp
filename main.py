@@ -8,22 +8,21 @@ import requests
 from fastapi import FastAPI, BackgroundTasks
 from pydantic import BaseModel
 
-# FastAPI alkalmazás inicializálása
-app = FastAPI(title="NQ ML Gatekeeper - PickMyTrade Edition")
+app = FastAPI(title="NQ ML Gatekeeper - Final Production Version")
 
-# Kereskedési beállítások és a te egyedi API végpontod
+# VÉGLEGES JAVÍTÁS: A Render felületéről olvassa be a küszöböt. 
+# Ha nincs ott beállítva semmi, akkor az optimális 0.38-as (38%) értéket használja.
+CONFIDENCE_THRESHOLD = float(os.getenv("CONFIDENCE_THRESHOLD", 0.38))
 PICKMYTRADE_URL = "https://api.pickmytrade.trade/v2/add-trade-data-latest?t=17149"
-CONFIDENCE_THRESHOLD = 0.45  # 45% feletti modell-bizonyosságnál lőjük ki a ravaszt
 
-# Az ML modell betöltése a memóriába indításkor
+# Modell betöltése
 MODEL_PATH = "nq_scalp_model.joblib"
 if os.path.exists(MODEL_PATH):
     model = joblib.load(MODEL_PATH)
-    print("[+] Az ML Modell sikeresen betöltve a memóriába.")
+    print(f"[+] ML Modell betöltve. Aktuális küszöbérték: {CONFIDENCE_THRESHOLD}")
 else:
-    raise FileNotFoundError(f"Hiba: A {MODEL_PATH} nem található a gyökérmappában!")
+    raise FileNotFoundError(f"Hiba: A {MODEL_PATH} nem található!")
 
-# TradingView-ból érkező JSON struktúra validálása
 class TVPayload(BaseModel):
     open: float
     high: float
@@ -37,19 +36,13 @@ class TVPayload(BaseModel):
     minute: int
 
 def forward_to_execution(side: str, close_price: float):
-    """
-    Összeállítja a PickMyTrade által elvárt pontos JSON struktúrát,
-    dinamikusan behelyettesíti az árat és az időt, majd kilövi a ravaszt.
-    """
-    # Aktuális időbélyeg lekérése a megfelelő formátumban
     current_time_str = datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
     
-    # A te pontos, egyedi JSON üzenetsablonod precíz replikációja
     payload = {
         "strategy_name": "",
         "symbol": "MNQM6",
         "date": current_time_str,
-        "data": side,  # "buy" vagy "sell"
+        "data": side,
         "quantity": 10,
         "risk_percentage": 0,
         "price": close_price,
@@ -84,53 +77,40 @@ def forward_to_execution(side: str, close_price: float):
         ]
     }
     
-    # Küldési folyamat végrehajtása a PickMyTrade felé
     try:
         headers = {"Content-Type": "application/json"}
         response = requests.post(PICKMYTRADE_URL, json=payload, headers=headers, timeout=5)
-        print(f"[+] Szignál ({side.upper()}) kiküldve a PickMyTrade-nek. Ár: {close_price} | Válasz: {response.status_code}")
+        print(f"[+] Szignál ({side.upper()}) elküldve a PickMyTrade-nek. Státusz: {response.status_code}")
     except Exception as e:
-        print(f"[-] Hiba történt a PickMyTrade API elérése közben: {e}")
+        print(f"[-] Végrehajtási hiba: {e}")
 
 @app.get("/")
 def read_root():
-    return {"status": "online", "model_loaded": True, "target_endpoint": "PickMyTrade"}
+    return {"status": "online", "confidence_threshold": CONFIDENCE_THRESHOLD, "target": "PickMyTrade"}
 
 @app.post("/tv-webhook")
 def process_tradingview_signal(data: TVPayload, background_tasks: BackgroundTasks):
-    # 1. DataFrame építése az érkező gyertya adataiból a modell számára
     features = pd.DataFrame([{
-        'Open': data.open,
-        'High': data.high,
-        'Low': data.low,
-        'Close': data.close,
-        'Volume': data.volume,
-        'ATR': data.atr,
-        'RSI': data.rsi,
-        'Vol_ZScore': data.vol_zscore,
-        'Hour': data.hour,
-        'Minute': data.minute
+        'Open': data.open, 'High': data.high, 'Low': data.low, 'Close': data.close,
+        'Volume': data.volume, 'ATR': data.atr, 'RSI': data.rsi, 'Vol_ZScore': data.vol_zscore,
+        'Hour': data.hour, 'Minute': data.minute
     }])
     
-    # 2. Modell valószínűségek lekérése [0: No Trade, 1: Long (buy), 2: Short (sell)]
     probabilities = model.predict_proba(features)[0]
     long_prob = probabilities[1]
     short_prob = probabilities[2]
     
-    print(f"[i] Bejövő TV adat - Ár: {data.close} | Buy Prob: {long_prob:.2f} | Sell Prob: {short_prob:.2f}")
+    print(f"[i] Szignál elemzés -> Buy Prob: {long_prob:.2f} | Sell Prob: {short_prob:.2f} | Küszöb: {CONFIDENCE_THRESHOLD}")
     
-    # 3. Modell alapú szűrés és döntéshozatal
     if long_prob > CONFIDENCE_THRESHOLD and long_prob > short_prob:
-        print(f"[🔥] BUY SZIGNÁL ÁTENGEDVE ({long_prob*100:.1f}%) -> Végrehajtás indítása...")
-        # Háttérfolyamatként indítjuk a küldést, hogy a TradingView felé azonnali legyen a válaszidő
+        print(f"[🔥] BUY ÁTENGEDVE ({long_prob*100:.1f}%) -> Küldés...")
         background_tasks.add_task(forward_to_execution, "buy", data.close)
         return {"decision": "BUY", "confidence": float(long_prob)}
         
     elif short_prob > CONFIDENCE_THRESHOLD and short_prob > long_prob:
-        print(f"[🔥] SELL SZIGNÁL ÁTENGEDVE ({short_prob*100:.1f}%) -> Végrehajtás indítása...")
+        print(f"[🔥] SELL ÁTENGEDVE ({short_prob*100:.1f}%) -> Küldés...")
         background_tasks.add_task(forward_to_execution, "sell", data.close)
         return {"decision": "SELL", "confidence": float(short_prob)}
         
     else:
-        print("[💤] Szignál blokkolva: Nem érte el a matematikai minimum küszöböt.")
         return {"decision": "NO_TRADE", "buy_prob": float(long_prob), "sell_prob": float(short_prob)}
